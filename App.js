@@ -11,7 +11,7 @@ import {
   StatusBar,
 } from 'react-native';
 import * as Location from 'expo-location';
-import { computeCloudBreaks, findNextBreak } from './src/cloudBreakEngine.js';
+import { computeCloudBreaks, findNextBreak, interpolateAtTime } from './src/cloudBreakEngine.js';
 import { geocodeLocation } from './src/openMeteo.js';
 import { getSunPosition } from './src/sunGeometry.js';
 import { Widget } from './src/widget.js';
@@ -24,6 +24,10 @@ function formatDate(date) {
   return date.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
+function formatHour(date) {
+  return date.toLocaleTimeString([], { hour: '2-digit' });
+}
+
 function getWeatherIcon(breakItem) {
   if (!breakItem) return '?';
   if (breakItem.isNight) return '🌙';
@@ -34,10 +38,27 @@ function getWeatherIcon(breakItem) {
   return '⛅';
 }
 
+function getCloudIcon(breakItem) {
+  const icon = getWeatherIcon(breakItem);
+  if (icon === '🌙' || icon === '⏳') return icon;
+  return icon;
+}
+
+function getSunshinePercent(breakItem) {
+  if (!breakItem || breakItem.isNight) return 0;
+  if (!breakItem.bandResults) return 100;
+  
+  let transmission = 1;
+  for (const band of ['low', 'mid', 'high']) {
+    const cover = breakItem.bandResults[band]?.correctedCover ?? 0;
+    transmission *= (1 - Math.min(cover, 100) / 100);
+  }
+  return Math.round(transmission * 100);
+}
+
 export default function App() {
   const [location, setLocation] = useState(null);
   const [forecast, setForecast] = useState(null);
-  const [sunPosition, setSunPosition] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -67,10 +88,21 @@ export default function App() {
     try {
       const breaks = await computeCloudBreaks(lat, lon);
       setForecast(breaks);
-      setSunPosition(getSunPosition(new Date(), lat, lon));
+      updateWidget(breaks);
     } catch (e) {
       setError(e.message);
     }
+  };
+
+  const updateWidget = async (breaks) => {
+    if (!breaks || breaks.length === 0) return;
+    const current = breaks[0];
+    const next = findNextBreak(breaks);
+    const status = current?.isNight ? 'Night' : current?.cloudBreak ? 'Clear' : 'Cloudy';
+    const emoji = getWeatherIcon(current);
+    const nextBreakTime = next ? `${formatDate(next.timestamp)} ${formatTime(next.timestamp)}` : '--';
+    const cloudCover = current?.bandResults?.low?.correctedCover?.toFixed(0) ?? '?';
+    try { await Widget.update(status, emoji, nextBreakTime, cloudCover); } catch {}
   };
 
   const selectLocation = (loc) => {
@@ -82,32 +114,27 @@ export default function App() {
   };
 
   useEffect(() => { getLocation(); }, []);
-  
-  // Update widget when forecast changes
+
+  // Update widget every 5 minutes
   useEffect(() => {
-    if (forecast && forecast.length > 0) {
-      updateWidget();
-    }
+    const interval = setInterval(() => {
+      if (forecast) updateWidget(forecast);
+    }, 5 * 60 * 1000);
+    return () => clearInterval(interval);
   }, [forecast]);
-  
-  const updateWidget = async () => {
-    if (!currentData) return;
-    const status = currentData.isNight ? 'Night' : currentData.cloudBreak ? 'Clear Sun' : 'Cloudy';
-    const emoji = getWeatherIcon(currentData);
-    const nextBreakTime = nextBreak ? `${formatDate(nextBreak.timestamp)} ${formatTime(nextBreak.timestamp)}` : '--';
-    const temp = currentData?.bandResults?.low?.correctedCover?.toFixed(0) ?? '?';
-    
-    try {
-      await Widget.update(status, emoji, nextBreakTime, `${temp}%`);
-    } catch (e) {
-      // Widget update failed silently
-    }
-  };
 
   const now = new Date();
   const currentData = forecast?.[0];
   const nextBreak = forecast ? findNextBreak(forecast) : null;
   const hourlyData = forecast?.slice(0, 24) || [];
+
+  // Generate 5-minute intervals for next hour with interpolation
+  const fiveMinData = [];
+  for (let i = 0; i < 12; i++) {
+    const time = new Date(now.getTime() + i * 5 * 60 * 1000);
+    const interpolated = forecast ? interpolateAtTime(forecast, time, location?.lat, location?.lon) : null;
+    fiveMinData.push({ time, data: interpolated, isNow: i === 0 });
+  }
 
   if (loading) {
     return (
@@ -126,14 +153,17 @@ export default function App() {
       <StatusBar barStyle="light-content" />
       
       <View style={styles.header}>
-        <Text style={styles.title}>Sunshine</Text>
-        <Text style={styles.status}>{getWeatherIcon(currentData)} {currentData?.isNight ? 'Night' : currentData?.cloudBreak ? 'Clear' : 'Cloudy'}</Text>
+        <View style={styles.headerLeft}>
+          <Text style={styles.title}>Sunshine</Text>
+          <Text style={styles.location}>{location?.name || 'Unknown'}</Text>
+        </View>
+        <Text style={styles.date}>{formatDate(now)}</Text>
       </View>
 
       <View style={styles.searchRow}>
         <TextInput
           style={styles.searchInput}
-          placeholder="Search location..."
+          placeholder="Search..."
           placeholderTextColor="#64748b"
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -159,56 +189,104 @@ export default function App() {
       )}
 
       <ScrollView style={styles.content}>
-        <View style={styles.card}>
-          <View style={styles.cardRow}>
-            <Text style={styles.locationText}>{location?.name || 'Unknown'}</Text>
-            <Text style={styles.dateText}>{formatDate(now)}</Text>
-          </View>
-          
-          <View style={styles.sunRow}>
-            <Text style={styles.sunEmoji}>{getWeatherIcon(currentData)}</Text>
-            <View style={styles.sunInfo}>
-              <Text style={styles.sunElev}>Sun {currentData?.sunElevation?.toFixed(1) ?? '?'}°</Text>
-              <Text style={styles.sunAz}>Az {currentData?.sunAzimuth?.toFixed(0) ?? '?'}°</Text>
+        {/* Current Status Card */}
+        <View style={styles.statusCard}>
+          <View style={styles.statusMain}>
+            <Text style={styles.statusIcon}>{getWeatherIcon(currentData)}</Text>
+            <View style={styles.statusInfo}>
+              <Text style={styles.statusLabel}>
+                {currentData?.isNight ? 'Night' : currentData?.cloudBreak ? 'Direct Sunlight' : 'Clouds Blocking Sun'}
+              </Text>
+              <Text style={styles.statusDetail}>
+                {currentData?.isNight 
+                  ? 'Sun is below horizon'
+                  : `Sun elevation: ${currentData?.sunElevation?.toFixed(1)}°`
+                }
+              </Text>
             </View>
           </View>
-
-          <View style={styles.cloudRow}>
+          
+          <View style={styles.cloudBars}>
             {['low', 'mid', 'high'].map(band => {
               const data = currentData?.bandResults?.[band];
               const blocked = data?.blocked;
+              const cover = data?.correctedCover?.toFixed(0) ?? '?';
               return (
-                <View key={band} style={[styles.cloudItem, blocked && styles.cloudBlocked]}>
-                  <Text style={styles.cloudBand}>{band}</Text>
-                  <Text style={styles.cloudPct}>{data?.correctedCover?.toFixed(0) ?? '?'}%</Text>
+                <View key={band} style={styles.cloudBar}>
+                  <View style={styles.cloudBarHeader}>
+                    <Text style={styles.cloudBarLabel}>{band.toUpperCase()}</Text>
+                    <Text style={[styles.cloudBarPct, blocked && styles.cloudBarPctBlocked]}>
+                      {cover}%
+                    </Text>
+                  </View>
+                  <View style={styles.cloudBarTrack}>
+                    <View style={[styles.cloudBarFill, blocked && styles.cloudBarFillBlocked, { width: `${Math.min(cover, 100)}%`}]} />
+                  </View>
                 </View>
               );
             })}
           </View>
         </View>
 
-        {nextBreak && (
-          <View style={styles.breakCard}>
-            <Text style={styles.breakLabel}>☀️ Next Clear Sun</Text>
-            <Text style={styles.breakTime}>{formatDate(nextBreak.timestamp)} {formatTime(nextBreak.timestamp)}</Text>
+        {/* Next Clear Sun */}
+        {nextBreak && !currentData?.isNight && (
+          <View style={styles.nextBreakCard}>
+            <Text style={styles.nextBreakLabel}>Next Clear Sun</Text>
+            <Text style={styles.nextBreakTime}>{formatDate(nextBreak.timestamp)} at {formatTime(nextBreak.timestamp)}</Text>
+            <Text style={styles.nextBreakDetail}>Sun elevation: {nextBreak.sunElevation?.toFixed(1)}°</Text>
           </View>
         )}
 
-        <View style={styles.hourlySection}>
-          <Text style={styles.sectionTitle}>Hourly</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            {hourlyData.map((item, i) => (
-              <View key={i} style={[styles.hourItem, item.cloudBreak && !item.isNight && styles.hourClear, item.isNight && styles.hourNight]}>
-                <Text style={styles.hourTime}>{formatTime(item.timestamp)}</Text>
-                <Text style={styles.hourIcon}>{getWeatherIcon(item)}</Text>
-                <Text style={styles.hourElev}>{item.sunElevation?.toFixed(0)}°</Text>
-              </View>
-            ))}
+        {/* 5-Minute Intervals */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Next Hour</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.minuteScroll}>
+            {fiveMinData.map((item, i) => {
+              const icon = getCloudIcon(item.data);
+              return (
+                <View key={i} style={[styles.minuteItem, item.isNow && styles.minuteItemNow]}>
+                  <Text style={styles.minuteTime}>{item.isNow ? 'Now' : formatTime(item.time)}</Text>
+                  <Text style={styles.minuteIcon}>{icon}</Text>
+                  <Text style={styles.minuteSun}>
+                    {getSunshinePercent(item.data)}%
+                  </Text>
+                </View>
+              );
+            })}
+          </ScrollView>
+        </View>
+
+        {/* Hourly Forecast */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Hourly Forecast</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.hourScroll}>
+            {hourlyData.map((item, i) => {
+              const isNow = i === 0;
+              return (
+                <View key={i} style={[styles.hourItem, isNow && styles.hourItemNow]}>
+                  <Text style={styles.hourTime}>{isNow ? 'Now' : formatHour(item.timestamp)}</Text>
+                  <Text style={styles.hourIcon}>{getWeatherIcon(item)}</Text>
+                  <Text style={styles.hourSun}>
+                    {item.sunElevation?.toFixed(0)}°↑
+                  </Text>
+                  <View style={styles.hourClouds}>
+                    {['low', 'mid', 'high'].map(band => {
+                      const d = item.bandResults?.[band];
+                      return (
+                        <Text key={band} style={styles.hourCloudText}>
+                          {band[0].toUpperCase()}: {d?.correctedCover?.toFixed(0) ?? '?'}%
+                        </Text>
+                      );
+                    })}
+                  </View>
+                </View>
+              );
+            })}
           </ScrollView>
         </View>
 
         <TouchableOpacity style={styles.refreshBtn} onPress={getLocation}>
-          <Text style={styles.refreshBtnText}>Refresh</Text>
+          <Text style={styles.refreshBtnText}>↻ Refresh</Text>
         </TouchableOpacity>
 
         <Text style={styles.attribution}>Weather: Open-Meteo (CC-BY 4.0)</Text>
@@ -228,42 +306,59 @@ export default function App() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f172a' },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 10 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', paddingHorizontal: 20, paddingTop: 10, paddingBottom: 8 },
+  headerLeft: { flex: 1 },
   title: { fontSize: 24, fontWeight: 'bold', color: '#fbbf24' },
-  status: { fontSize: 20 },
-  searchRow: { flexDirection: 'row', paddingHorizontal: 20, paddingVertical: 10, gap: 8 },
+  location: { color: '#64748b', fontSize: 12, marginTop: 2 },
+  date: { color: '#94a3b8', fontSize: 13 },
+  searchRow: { flexDirection: 'row', paddingHorizontal: 20, paddingVertical: 8, gap: 8 },
   searchInput: { flex: 1, backgroundColor: '#1e293b', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, color: '#fff', fontSize: 15 },
-  gpsBtn: { backgroundColor: '#1e293b', borderRadius: 10, paddingHorizontal: 14, justifyContent: 'center', alignItems: 'center' },
-  searchResults: { maxHeight: 180, marginHorizontal: 20, marginBottom: 8 },
+  gpsBtn: { backgroundColor: '#1e293b', borderRadius: 10, paddingHorizontal: 14, justifyContent: 'center' },
+  searchResults: { maxHeight: 150, marginHorizontal: 20, marginBottom: 8 },
   searchItem: { backgroundColor: '#1e293b', padding: 12, borderRadius: 8, marginBottom: 4 },
   searchItemName: { color: '#fff', fontWeight: '600' },
   searchItemDetail: { color: '#64748b', fontSize: 12, marginTop: 2 },
   content: { flex: 1, paddingHorizontal: 20 },
-  card: { backgroundColor: '#1e293b', borderRadius: 16, padding: 16, marginTop: 8 },
-  cardRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 },
-  locationText: { color: '#94a3b8', fontSize: 14 },
-  dateText: { color: '#64748b', fontSize: 13 },
-  sunRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  sunEmoji: { fontSize: 40, marginRight: 12 },
-  sunInfo: { flex: 1 },
-  sunElev: { color: '#fff', fontSize: 18, fontWeight: '600' },
-  sunAz: { color: '#94a3b8', fontSize: 13, marginTop: 2 },
-  cloudRow: { flexDirection: 'row', justifyContent: 'space-around', paddingTop: 12, borderTopWidth: 1, borderTopColor: '#334155' },
-  cloudItem: { alignItems: 'center', padding: 8, borderRadius: 8, minWidth: 70 },
-  cloudBlocked: { backgroundColor: '#450a0a' },
-  cloudBand: { color: '#94a3b8', fontSize: 11, fontWeight: '600' },
-  cloudPct: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  breakCard: { backgroundColor: '#14532d', borderRadius: 12, padding: 14, marginTop: 12 },
-  breakLabel: { color: '#4ade80', fontSize: 13 },
-  breakTime: { color: '#fff', fontSize: 18, fontWeight: '600', marginTop: 4 },
-  hourlySection: { marginTop: 16 },
+  
+  statusCard: { backgroundColor: '#1e293b', borderRadius: 16, padding: 16, marginTop: 8 },
+  statusMain: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  statusIcon: { fontSize: 48, marginRight: 14 },
+  statusInfo: { flex: 1 },
+  statusLabel: { color: '#fff', fontSize: 18, fontWeight: '600' },
+  statusDetail: { color: '#94a3b8', fontSize: 13, marginTop: 4 },
+  cloudBars: { gap: 10 },
+  cloudBar: {},
+  cloudBarHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+  cloudBarLabel: { color: '#94a3b8', fontSize: 12 },
+  cloudBarPct: { color: '#22c55e', fontSize: 12, fontWeight: '600' },
+  cloudBarPctBlocked: { color: '#ef4444' },
+  cloudBarTrack: { height: 4, backgroundColor: '#334155', borderRadius: 2 },
+  cloudBarFill: { height: '100%', backgroundColor: '#22c55e', borderRadius: 2 },
+  cloudBarFillBlocked: { backgroundColor: '#ef4444' },
+  
+  nextBreakCard: { backgroundColor: '#14532d', borderRadius: 12, padding: 14, marginTop: 10 },
+  nextBreakLabel: { color: '#4ade80', fontSize: 12, fontWeight: '600' },
+  nextBreakTime: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginTop: 4 },
+  nextBreakDetail: { color: '#86efac', fontSize: 12, marginTop: 2 },
+  
+  section: { marginTop: 20 },
   sectionTitle: { color: '#94a3b8', fontSize: 13, fontWeight: '600', marginBottom: 10 },
-  hourItem: { backgroundColor: '#1e293b', borderRadius: 10, padding: 10, marginRight: 6, alignItems: 'center', minWidth: 52 },
-  hourClear: { backgroundColor: '#14532d' },
-  hourNight: { backgroundColor: '#0c1929' },
-  hourTime: { color: '#94a3b8', fontSize: 11 },
-  hourIcon: { fontSize: 16, marginVertical: 4 },
-  hourElev: { color: '#fff', fontSize: 11 },
+  minuteScroll: {},
+  minuteItem: { backgroundColor: '#1e293b', borderRadius: 10, padding: 10, marginRight: 8, alignItems: 'center', minWidth: 56 },
+  minuteItemNow: { backgroundColor: '#fbbf24' },
+  minuteTime: { color: '#94a3b8', fontSize: 10, marginBottom: 4 },
+  minuteIcon: { fontSize: 20, marginBottom: 4 },
+  minuteSun: { color: '#fff', fontSize: 11, fontWeight: '600' },
+  
+  hourScroll: {},
+  hourItem: { backgroundColor: '#1e293b', borderRadius: 10, padding: 10, marginRight: 6, alignItems: 'center', minWidth: 60 },
+  hourItemNow: { borderWidth: 2, borderColor: '#fbbf24' },
+  hourTime: { color: '#94a3b8', fontSize: 11, marginBottom: 4 },
+  hourIcon: { fontSize: 18, marginBottom: 4 },
+  hourSun: { color: '#fbbf24', fontSize: 12, fontWeight: '600' },
+  hourClouds: { marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#334155' },
+  hourCloudText: { color: '#64748b', fontSize: 9 },
+  
   refreshBtn: { backgroundColor: '#334155', borderRadius: 10, padding: 12, alignItems: 'center', marginTop: 16, marginBottom: 20 },
   refreshBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
   attribution: { color: '#475569', fontSize: 11, textAlign: 'center', paddingBottom: 30 },

@@ -102,6 +102,61 @@ export function findNextBreak(breaks) {
   return null;
 }
 
+export function interpolateAtTime(breaks, targetTime, observerLat, observerLon) {
+  const now = targetTime || new Date();
+  const currentHour = new Date(now);
+  currentHour.setMinutes(0, 0, 0);
+  const nextHour = new Date(currentHour);
+  nextHour.setHours(nextHour.getHours() + 1);
+  
+  const currentData = breaks.find(b => b.timestamp.getTime() === currentHour.getTime());
+  const nextData = breaks.find(b => b.timestamp.getTime() === nextHour.getTime());
+  
+  if (!currentData) return null;
+  
+  const fraction = (now - currentHour) / (60 * 60 * 1000);
+  
+  const sun = getSunPosition(now, observerLat, observerLon);
+  const isNight = sun.elevationDeg <= 0;
+  
+  if (isNight) {
+    return {
+      timestamp: now,
+      isNight: true,
+      sunElevation: sun.elevationDeg,
+      cloudBreak: false,
+      bandResults: null,
+    };
+  }
+  
+  const bandResults = {};
+  let isBlocked = false;
+  
+  for (const band of ['low', 'mid', 'high']) {
+    const currentCover = currentData.bandResults?.[band]?.correctedCover ?? 0;
+    const nextCover = nextData?.bandResults?.[band]?.correctedCover ?? currentCover;
+    const interpolatedCover = currentCover + (nextCover - currentCover) * fraction;
+    
+    const threshold = CLOUD_CONFIG.blockThresholds[band];
+    const blocked = interpolatedCover > threshold;
+    
+    bandResults[band] = {
+      correctedCover: interpolatedCover,
+      blocked,
+    };
+    
+    if (blocked) isBlocked = true;
+  }
+  
+  return {
+    timestamp: now,
+    isNight: false,
+    sunElevation: sun.elevationDeg,
+    cloudBreak: !isBlocked,
+    bandResults,
+  };
+}
+
 export function findBreakWindows(breaks, minDurationMinutes = 15) {
   const windows = [];
   let windowStart = null;
