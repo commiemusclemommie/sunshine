@@ -7,8 +7,9 @@ Cloud break predictor - tells you when the sun will shine through clouds.
 - **Current sun status** - Elevation, azimuth, and visibility
 - **Cloud coverage analysis** - Low/Mid/High altitude cloud detection
 - **Next clear sun window** - Predicts when direct sunlight is available
-- **48-hour forecast** - Hourly cloud break predictions
+- **Hourly forecast** - 24-hour cloud break predictions
 - **Location-based** - GPS or manual location search
+- **Android Widget** - Home screen widget with 5-min updates
 
 ## Installation
 
@@ -20,6 +21,11 @@ npx expo run:android
 ## Build APK
 
 ```bash
+npx expo prebuild --platform android
+# Copy native-widget files to android/app/src/main/
+cp -r native-widget/kotlin/* android/app/src/main/kotlin/
+cp -r native-widget/res/* android/app/src/main/res/
+# Update MainApplication.kt to include WidgetPackage()
 cd android
 ./gradlew assembleRelease
 ```
@@ -31,15 +37,18 @@ APK outputs to: `android/app/build/outputs/apk/release/app-release.apk`
 1. Gets your location via GPS
 2. Calculates sun position (azimuth/elevation) using SunCalc
 3. Fetches cloud coverage data from Open-Meteo for 3 altitude bands
-4. Calculates "sun ray" offsets at low (2km), mid (6km), high (11km) altitudes
-5. Predicts cloud breaks based on threshold analysis
+4. Predicts cloud breaks based on threshold analysis
 
-## Configuration
+## Widget Setup
 
-Edit `src/config.js` to adjust:
-- Cloud altitude bands
-- Block thresholds (when clouds block sunlight)
-- Model bias correction
+After `expo prebuild`, copy widget files:
+
+```bash
+cp -r native-widget/kotlin/* android/app/src/main/kotlin/
+cp -r native-widget/res/* android/app/src/main/res/
+```
+
+Then rebuild. The widget will appear in your widget picker as "Sunshine".
 
 ## Data Sources
 
