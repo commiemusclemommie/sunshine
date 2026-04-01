@@ -6,12 +6,9 @@ export async function computeCloudBreaks(observerLat, observerLon) {
   const { altitudeBands, blockThresholds, modelBiasCorrection, minSunElevationDeg } = CLOUD_CONFIG;
 
   const now = new Date();
-  const hours = Array.from({ length: 72 }, (_, i) => {
-    const t = new Date(now);
-    t.setMinutes(0, 0, 0);
-    t.setHours(t.getHours() + i);
-    return t;
-  });
+  const baseHour = new Date(now);
+  baseHour.setMinutes(0, 0, 0);
+  const hours = Array.from({ length: 72 }, (_, i) => new Date(baseHour.getTime() + i * 60 * 60 * 1000));
 
   const coordsToFetch = new Set();
   coordsToFetch.add(`${observerLat.toFixed(4)},${observerLon.toFixed(4)}`);
@@ -37,8 +34,11 @@ export async function computeCloudBreaks(observerLat, observerLon) {
     })
   );
 
-  return hourlyOffsets.map(({ t, sun, offsets }) => {
-    const isoHour = t.toISOString().slice(0, 13) + ':00';
+  const observerKey = `${observerLat.toFixed(4)},${observerLon.toFixed(4)}`;
+  const timezone = fetchMap[observerKey]?.timezone || 'UTC';
+
+  const breaks = hourlyOffsets.map(({ t, sun, offsets }) => {
+    const hourKey = String(Math.floor(t.getTime() / 1000));
 
     if (!offsets) {
       return {
@@ -57,7 +57,7 @@ export async function computeCloudBreaks(observerLat, observerLon) {
 
     for (const [band, coord] of Object.entries(offsets)) {
       const coordKey  = `${coord.lat.toFixed(4)},${coord.lon.toFixed(4)}`;
-      const cloudData = fetchMap[coordKey]?.hourly?.[isoHour];
+      const cloudData = fetchMap[coordKey]?.hourly?.[hourKey];
 
       if (!cloudData) {
         bandResults[band] = { cover: null, blocked: false, note: 'no data' };
@@ -66,8 +66,8 @@ export async function computeCloudBreaks(observerLat, observerLon) {
 
       const rawCover      = cloudData[band] ?? 0;
       const correctedCover = Math.max(0, rawCover - (modelBiasCorrection[band] ?? 0));
-      const threshold      = blockThresholds[band];
-      const blocked        = correctedCover > threshold;
+      const threshold = blockThresholds[band];
+      const blocked = correctedCover > threshold;
 
       bandResults[band] = {
         offsetCoord:     coord,
@@ -90,6 +90,9 @@ export async function computeCloudBreaks(observerLat, observerLon) {
       bandResults,
     };
   });
+
+  breaks.timezone = timezone;
+  return breaks;
 }
 
 export function findNextBreak(breaks) {
@@ -118,11 +121,13 @@ export function interpolateAtTime(breaks, targetTime, observerLat, observerLon) 
   
   const sun = getSunPosition(now, observerLat, observerLon);
   const isNight = sun.elevationDeg <= 0;
+  const isBelowMinElevation = !isNight && sun.elevationDeg < CLOUD_CONFIG.minSunElevationDeg;
   
-  if (isNight) {
+  if (isNight || isBelowMinElevation) {
     return {
       timestamp: now,
-      isNight: true,
+      isNight,
+      isBelowMinElevation,
       sunElevation: sun.elevationDeg,
       cloudBreak: false,
       bandResults: null,

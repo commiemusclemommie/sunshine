@@ -1,0 +1,55 @@
+name: Build and Release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      -name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      
+      - name: Prebuild Expo
+        run: npx expo prebuild --platform android
+      
+      - name: Build Release APK
+        run: cd android && ./gradlew assembleRelease
+      
+      - name: Get version
+        id: version
+        run: echo "VERSION=$(node -p "require('./app.json').expo.version")" >> $GITHUB_OUTPUT
+      
+      - name: Get commit hash
+        id: commit
+        run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}-${{ steps.commit.outputs.SHORT_SHA }}
+          name: Build ${{ steps.commit.outputs.SHORT_SHA }}
+          generate_release_notes: true
+          files: android/app/build/outputs/apk/release/app-release.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -5,6 +5,10 @@ const DEG_TO_RAD = Math.PI / 180;
 const RAD_TO_DEG = 180 / Math.PI;
 const EARTH_RADIUS_KM = 6371;
 
+function normalizeLongitudeDeg(lonDeg) {
+  return ((lonDeg + 540) % 360) - 180;
+}
+
 export function getSunPosition(date, lat, lon) {
   const pos = SunCalc.getPosition(date, lat, lon);
   return {
@@ -41,7 +45,7 @@ export function getOffsetCoordinate(observerLat, observerLon, azimuthDeg, elevat
 
   return {
     lat: newLatRad * RAD_TO_DEG,
-    lon: newLonRad * RAD_TO_DEG,
+    lon: normalizeLongitudeDeg(newLonRad * RAD_TO_DEG),
     horizontalDistKm,
   };
 }
